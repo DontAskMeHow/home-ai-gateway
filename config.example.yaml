@@ -1,0 +1,87 @@
+# Публичный шаблон. Реальные адреса и токены кладутся в config.local.yaml
+# (он в .gitignore), этот файл остаётся нейтральным примером.
+
+listen:
+  host: 0.0.0.0
+  port: 8090
+
+# Как часто опрашивать апстримы для /healthz и gateway_upstream_up.
+probe_interval_s: 30
+
+# Сколько держать сырых событий в SQLite.
+retention_days: 90
+
+db: ./data/gateway.db
+log: ./data/usage.jsonl
+
+upstreams:
+  # Алеас в конфиге = имя модели на входе шлюза.
+  next:
+    base_url: http://llm-a.internal:8040/mercury/next/v1
+    model: Big-Next-Instruct
+    timeout_s: 180
+    retries: 1
+    fallback: [mid]
+    # Цена из TCO железа: амортизация + электричество на измеренную пропускную
+    # способность. $ за 1M токенов.
+    price:
+      input: 0.30
+      cached_input: 0.05
+      output: 1.20
+    # Для сравнения: сколько стоил бы такой же объём у внешнего провайдера.
+    api_price:
+      input: 0.60
+      cached_input: 0.10
+      output: 2.40
+
+  mid:
+    base_url: http://llm-b.internal:8040/mercury/mid/v1
+    model: Mid-Instruct
+    timeout_s: 90
+    retries: 1
+    fallback: []
+    price:
+      input: 0.20
+      cached_input: 0.04
+      output: 0.80
+    api_price:
+      input: 0.50
+      cached_input: 0.10
+      output: 2.00
+
+  # Хостинг за границей релей-туннеля: ходит напрямую из контейнера.
+  external:
+    base_url: https://api.external-provider.com/v1
+    model: gpt-mini
+    timeout_s: 60
+    retries: 2
+    fallback: [mid]
+    api_key: ${EXTERNAL_API_KEY}
+    price:
+      input: 0.60
+      cached_input: 0.10
+      output: 2.40
+    api_price:
+      input: 0.60
+      cached_input: 0.10
+      output: 2.40
+
+keys:
+  kimi:
+    token: sk-gateway-kimi
+    models: [next, mid, external]
+    rpm: 30
+    tpm: 200000
+    daily_budget_usd: 5
+  scripts:
+    token: sk-gateway-scripts
+    models: [next, mid]
+    rpm: 60
+    tpm: 400000
+    daily_budget_usd: 8
+  phone:
+    token: sk-gateway-phone
+    models: [next]
+    rpm: 20
+    tpm: 100000
+    daily_budget_usd: 3
