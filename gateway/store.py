@@ -157,10 +157,34 @@ def totals(conn: sqlite3.Connection) -> dict:
     }
 
 
-def by_model(conn: sqlite3.Connection) -> list[tuple]:
+def by_model_status(conn: sqlite3.Connection) -> list[tuple]:
+    """Запросы по (модель, статус) — уникальные серии для счётчика запросов."""
     return conn.execute(
-        "SELECT model, status, COUNT(*), COALESCE(SUM(prompt + completion),0),"
-        " COALESCE(SUM(cost_tco),0) FROM events GROUP BY model, status",
+        "SELECT model, status, COUNT(*) FROM events GROUP BY model, status",
+    ).fetchall()
+
+
+def by_model(conn: sqlite3.Connection) -> list[tuple]:
+    """Токены и стоимость по модели (без статуса — иначе дубли серий в /metrics)."""
+    return conn.execute(
+        "SELECT model, COALESCE(SUM(prompt + completion),0), COALESCE(SUM(cost_tco),0)"
+        " FROM events GROUP BY model",
+    ).fetchall()
+
+
+def by_key_status(conn: sqlite3.Connection) -> list[tuple]:
+    return conn.execute(
+        "SELECT key, status, COUNT(*) FROM events GROUP BY key, status",
+    ).fetchall()
+
+
+def by_key(conn: sqlite3.Connection) -> list[tuple]:
+    """Букеты токенов и обе стоимости по ключу-потребителю."""
+    return conn.execute(
+        "SELECT key, COALESCE(SUM(prompt),0), COALESCE(SUM(cached),0),"
+        " COALESCE(SUM(completion),0), COALESCE(SUM(reasoning),0),"
+        " COALESCE(SUM(cost_tco),0), COALESCE(SUM(cost_api),0)"
+        " FROM events GROUP BY key",
     ).fetchall()
 
 

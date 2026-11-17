@@ -26,6 +26,8 @@ def main() -> int:
     parser.add_argument("--base", default="http://127.0.0.1:8090")
     parser.add_argument("--token", default=None)
     parser.add_argument("--model", default="next")
+    parser.add_argument("--responses-model", default=None,
+                        help="алиас апстрима с /v1/responses (например, мост подписки)")
     args = parser.parse_args()
 
     headers = {}
@@ -93,6 +95,23 @@ def main() -> int:
     results.append(check("usage пришёл в финальном чанке", bool(final_usage),
                          json.dumps(final_usage)[:120]))
 
+    if args.responses_model:
+        responses_body = {"model": args.responses_model, "max_output_tokens": 160,
+                          "input": [{"role": "user", "content": [
+                              {"type": "input_text",
+                               "text": "Столица Франции? Ответь одним словом."}]}]}
+        raw = client.post("/v1/responses", json=responses_body)
+        data = json.loads(raw.text) if raw.status_code == 200 else {}
+        texts = [part.get("text") for item in (data.get("output") or [])
+                 if item.get("type") == "message"
+                 for part in item.get("content", []) if "text" in (part.get("type") or "")]
+        answer = " ".join(t for t in texts if t)
+        results.append(check("responses API без стрима", bool(answer),
+                             f"HTTP {raw.status_code} {repr(answer)[:60]}"))
+        results.append(check("responses usage заполнен",
+                             bool((data.get("usage") or {}).get("input_tokens")),
+                             json.dumps(data.get("usage"))[:120]))
+
     limiter = httpx.Client(base_url=args.base, headers={"Authorization": "Bearer rpm1"},
                            timeout=60, trust_env=False)
     # Окно rpm считается за последние 60 с, поэтому пару запросов мог съесть
@@ -112,6 +131,8 @@ def main() -> int:
 
     metrics = client.get("/metrics").text
     needed = ("gateway_requests_total", "gateway_tokens_total", "gateway_cost_usd",
+              "gateway_model_tokens_total", "gateway_key_requests_total",
+              "gateway_key_tokens_total", "gateway_key_cost_usd",
               "gateway_upstream_up", "gateway_request_duration_seconds_bucket")
     missing = [name for name in needed if name not in metrics]
     results.append(check("метрики содержат нужные серии", not missing,

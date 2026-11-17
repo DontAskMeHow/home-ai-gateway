@@ -119,6 +119,80 @@ def _usage_from_sse(text: str) -> tuple[dict, str]:
     return usage, "".join(pieces)
 
 
+def _responses_prompt_text(payload: dict) -> str:
+    """Текст промпта из тела responses API (`input` — строка или список частей)."""
+    source = payload.get("input")
+    if isinstance(source, str):
+        return source
+    parts: list[str] = []
+    for item in source or []:
+        if isinstance(item, dict):
+            content = item.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                parts.extend(str(part.get("text") or "")
+                             for part in content if isinstance(part, dict))
+        else:
+            parts.append(str(item))
+    return " ".join(part for part in parts if part)
+
+
+def _responses_answer_text(payload: dict) -> str:
+    """Текст ответа responses API (для оценки токенов при пустом usage)."""
+    pieces: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and "text" in (part.get("type") or ""):
+                pieces.append(str(part.get("text") or ""))
+    return " ".join(pieces)
+
+
+def _buckets_responses(usage: dict, answer: str,
+                       prompt_text: str) -> tuple[int, int, int, int]:
+    """Букеты из usage responses API: input/output-токены и их details."""
+    in_details = usage.get("input_tokens_details") or {}
+    out_details = usage.get("output_tokens_details") or {}
+    prompt = int(usage.get("input_tokens") or 0)
+    completion = int(usage.get("output_tokens") or 0)
+    cached = int(in_details.get("cached_tokens") or 0)
+    reasoning = int(out_details.get("reasoning_tokens") or 0)
+    if not prompt:
+        prompt = store.estimate_tokens(prompt_text)
+    if not completion:
+        completion = store.estimate_tokens(answer)
+    return prompt, cached, completion, reasoning
+
+
+def _usage_from_sse_responses(text: str) -> tuple[dict, str]:
+    """Usage из события response.completed и текст из дельт SSE responses API."""
+    usage: dict = {}
+    pieces: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("data:"):
+            continue
+        body = line[5:].strip()
+        if not body or body == "[DONE]":
+            continue
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        event = obj.get("type") or ""
+        if event == "response.completed":
+            response_obj = obj.get("response") or {}
+            if isinstance(response_obj.get("usage"), dict):
+                usage = response_obj["usage"]
+        if event == "response.output_text.delta":
+            delta = obj.get("delta")
+            if delta:
+                pieces.append(str(delta))
+    return usage, "".join(pieces)
+
+
 async def _probe_loop(client: httpx.AsyncClient, cfg: dict, health: dict,
                       errors: dict) -> None:
     interval = float(cfg.get("probe_interval_s", 30))
@@ -170,9 +244,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return names
 
     async def call_upstream(client: httpx.AsyncClient, name: str, payload: dict,
-                            stream: bool):
+                            stream: bool, path: str = "/chat/completions"):
         up = cfg["upstreams"][name]
-        url = up["base_url"].rstrip("/") + "/chat/completions"
+        url = up["base_url"].rstrip("/") + path
         headers = {"Content-Type": "application/json"}
         if up.get("api_key"):
             headers["Authorization"] = f"Bearer {up['api_key']}"
@@ -310,6 +384,86 @@ def create_app(config_path: str | None = None) -> FastAPI:
             answer = _answer_text(data)
             prompt, cached, completion, reasoning = _buckets(usage_obj, answer,
                                                             prompt_text)
+            finish(key_name, name, prompt, cached, completion, reasoning, started, "ok",
+                   prompt_text)
+            headers.update(limits_mod.check(conn, key_name, key_conf)[1]["headers"])
+            headers["x-gateway-upstream"] = name
+            return JSONResponse(data, headers=headers)
+
+        return JSONResponse({"error": {"message": "все апстримы недоступны",
+                                       "type": "UpstreamUnavailable"}},
+                            status_code=503, headers=headers)
+
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        payload = await _body_json(request)
+        if not payload.get("model") or "input" not in payload:
+            return JSONResponse({"error": {"message": "нужны `model` и `input`",
+                                           "type": "BadRequestError"}}, status_code=400)
+        key_name = _auth_key(request, cfg)
+        key_conf = _key_conf(cfg, key_name)
+
+        alias = cfg_mod.resolve_upstream(cfg, payload.get("model"))
+        if alias is None:
+            return JSONResponse({"error": {"message": f"неизвестная модель: "
+                                                       f"{payload.get('model')}",
+                                           "type": "BadRequestError"}}, status_code=400)
+        if key_conf.get("models") and alias not in key_conf["models"]:
+            return JSONResponse({"error": {"message": f"ключу {key_name} недоступна "
+                                                       f"модель {alias}",
+                                           "type": "ForbiddenError"}}, status_code=403)
+
+        ok, verdict = limits_mod.check(conn, key_name, key_conf)
+        headers = dict(verdict["headers"])
+        if not ok:
+            return JSONResponse({"error": {"message": verdict["reason"],
+                                           "type": "RateLimitError"}},
+                                status_code=429, headers=headers)
+
+        chain = chain_of(alias)
+        stream = bool(payload.get("stream"))
+        prompt_text = _responses_prompt_text(payload)
+        client: httpx.AsyncClient = request.app.state.client
+        started = time.perf_counter()
+
+        for name in chain:
+            try:
+                resp = await call_upstream(client, name, payload, stream,
+                                           path="/responses")
+            except RuntimeError as exc:
+                finish(key_name, name, 0, 0, 0, 0, started, f"error:{exc}"[:80],
+                       prompt_text)
+                if name is chain[-1]:
+                    return JSONResponse({"error": {"message": str(exc),
+                                                   "type": "UpstreamUnavailable"}},
+                                        status_code=503, headers=headers)
+                continue
+
+            if stream:
+                headers["x-gateway-upstream"] = name
+
+                async def relay(response=resp, upstream=name):
+                    collected: list[str] = []
+                    try:
+                        async for chunk in response.aiter_text():
+                            collected.append(chunk)
+                            yield chunk
+                    finally:
+                        await response.aclose()
+                    usage_obj, answer = _usage_from_sse_responses("".join(collected))
+                    prompt, cached, completion, reasoning = _buckets_responses(
+                        usage_obj, answer, prompt_text)
+                    finish(key_name, upstream, prompt, cached, completion, reasoning,
+                           started, "ok", prompt_text)
+
+                return StreamingResponse(relay(), media_type="text/event-stream",
+                                         headers=headers)
+
+            data = resp.json()
+            usage_obj = data.get("usage") or {}
+            answer = _responses_answer_text(data)
+            prompt, cached, completion, reasoning = _buckets_responses(
+                usage_obj, answer, prompt_text)
             finish(key_name, name, prompt, cached, completion, reasoning, started, "ok",
                    prompt_text)
             headers.update(limits_mod.check(conn, key_name, key_conf)[1]["headers"])

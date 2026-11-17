@@ -66,6 +66,24 @@ upstreams:
       cached_input: 0.10
       output: 2.40
 
+# Мост подписки: OpenAI-совместный эндпоинт, понимает и /v1/chat/completions,
+  # и /v1/responses — шлюз прозрачно пропускает оба формата (учёт одинаковый).
+  # Цены здесь номинальные: дневной бюджет ключа работает как кап токенов.
+  gpt:
+    base_url: http://127.0.0.1:10531/v1
+    model: gpt-5.6-luna
+    timeout_s: 120
+    retries: 1
+    fallback: []
+    price:
+      input: 1.00
+      cached_input: 0.10
+      output: 5.00
+    api_price:
+      input: 1.00
+      cached_input: 0.10
+      output: 5.00
+
 keys:
   kimi:
     token: sk-gateway-kimi

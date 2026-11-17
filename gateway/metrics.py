@@ -26,10 +26,30 @@ def render(conn, health: dict, samples: list[float]) -> str:
 
     lines.append("# HELP gateway_model_requests_total Requests by model and status")
     lines.append("# TYPE gateway_model_requests_total counter")
-    for model, status, hits, tokens, cost in store.by_model(conn):
+    for model, status, hits in store.by_model_status(conn):
         lines.append(f'gateway_model_requests_total{{model="{model}",status="{status}"}} {hits}')
+    lines.append("# HELP gateway_model_tokens_total Tokens by model")
+    lines.append("# TYPE gateway_model_tokens_total counter")
+    lines.append("# HELP gateway_model_cost_usd Cost in USD by model")
+    lines.append("# TYPE gateway_model_cost_usd counter")
+    for model, tokens, cost in store.by_model(conn):
         lines.append(f'gateway_model_tokens_total{{model="{model}"}} {tokens}')
         lines.append(f'gateway_model_cost_usd{{model="{model}"}} {cost:.6f}')
+
+    lines.append("# HELP gateway_key_requests_total Requests by key and status")
+    lines.append("# TYPE gateway_key_requests_total counter")
+    for key, status, hits in store.by_key_status(conn):
+        lines.append(f'gateway_key_requests_total{{key="{key}",status="{status}"}} {hits}')
+    lines.append("# HELP gateway_key_tokens_total Tokens by key and bucket")
+    lines.append("# TYPE gateway_key_tokens_total counter")
+    lines.append("# HELP gateway_key_cost_usd Cost in USD by key and price model")
+    lines.append("# TYPE gateway_key_cost_usd counter")
+    for key, prompt, cached, completion, reasoning, tco, api in store.by_key(conn):
+        for bucket, value in (("prompt", prompt), ("cached", cached),
+                               ("completion", completion), ("reasoning", reasoning)):
+            lines.append(f'gateway_key_tokens_total{{key="{key}",bucket="{bucket}"}} {value}')
+        lines.append(f'gateway_key_cost_usd{{key="{key}",price="tco"}} {tco:.6f}')
+        lines.append(f'gateway_key_cost_usd{{key="{key}",price="api"}} {api:.6f}')
 
     lines.append("# HELP gateway_upstream_up Upstream health from background probes")
     lines.append("# TYPE gateway_upstream_up gauge")
