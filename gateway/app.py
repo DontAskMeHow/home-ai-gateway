@@ -3,6 +3,7 @@
 Слой отвечает за:
   - один вход для всех потребителей (чат, список моделей, здоровье, метрики, учёт);
   - маршрутизацию по алиасам с таймаутами, ретраями и запасными апстримами;
+  - авторизацию по виртуальным ключам: неизвестный или пустой — 401;
   - учёт токенов по четырём букетам и стоимости по двум таблицам цен;
   - лимиты на ключ (rpm / tpm / дневной бюджет) с настоящим отклонением запроса;
   - честную деградацию: не стало апстрима — 503, без тихих повторов длинных запросов.
@@ -32,7 +33,11 @@ from . import store
 DEFAULT_KEY = "default"
 
 
-def _auth_key(request: Request, cfg: dict) -> str:
+def _auth_key(request: Request, cfg: dict) -> str | None:
+    """Имя ключа из Authorization; None — неизвестный или отсутствующий токен.
+
+    Конфиг без ключей (локальные пробы) сохраняет прежнее поведение: default.
+    """
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     if not cfg["keys"]:
         return DEFAULT_KEY
@@ -40,7 +45,7 @@ def _auth_key(request: Request, cfg: dict) -> str:
         expected = conf.get("token") or name
         if token and token == expected:
             return name
-    return token or DEFAULT_KEY
+    return None
 
 
 def _key_conf(cfg: dict, key_name: str) -> dict:
@@ -322,6 +327,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
             return JSONResponse({"error": {"message": "нужны сообщения в `messages`",
                                            "type": "BadRequestError"}}, status_code=400)
         key_name = _auth_key(request, cfg)
+        if key_name is None:
+            return JSONResponse({"error": {"message": "неизвестный или отсутствующий ключ",
+                                           "type": "AuthenticationError"}},
+                                status_code=401)
         key_conf = _key_conf(cfg, key_name)
 
         alias = cfg_mod.resolve_upstream(cfg, payload.get("model"))
@@ -401,6 +410,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
             return JSONResponse({"error": {"message": "нужны `model` и `input`",
                                            "type": "BadRequestError"}}, status_code=400)
         key_name = _auth_key(request, cfg)
+        if key_name is None:
+            return JSONResponse({"error": {"message": "неизвестный или отсутствующий ключ",
+                                           "type": "AuthenticationError"}},
+                                status_code=401)
         key_conf = _key_conf(cfg, key_name)
 
         alias = cfg_mod.resolve_upstream(cfg, payload.get("model"))

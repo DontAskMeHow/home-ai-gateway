@@ -3,7 +3,7 @@
     python scripts/smoke.py --base http://localhost:8090 --token sk-gateway-scripts
 
 Проверяет: здоровье, список моделей, чат без стрима и со стримом, объём токенов,
-отклонение по rpm, наличие букетов в /metrics.
+отклонение по rpm, наличие букетов в /metrics, отклонение неизвестного ключа.
 """
 
 from __future__ import annotations
@@ -62,6 +62,22 @@ def main() -> int:
     models = json.loads(client.get("/v1/models").text)
     results.append(check("v1/models непустой", len(models.get("data", [])) > 0,
                          f"{len(models.get('data', []))} записей"))
+
+    if args.token:
+        # Неизвестный/пустой ключ отклоняется до апстрима (401), а не метрится литералом.
+        anon = httpx.Client(base_url=args.base, timeout=30, trust_env=False)
+        bad = anon.post("/v1/chat/completions", json=dict(body, max_tokens=8),
+                        headers={"Authorization": "Bearer sk-neizvestnyy-klyuch"})
+        empty = anon.post("/v1/chat/completions", json=dict(body, max_tokens=8))
+        bad_responses = anon.post("/v1/responses",
+                                  json={"model": args.model, "input": "привет"})
+        results.append(check("неизвестный ключ отклоняется 401", bad.status_code == 401,
+                             f"HTTP {bad.status_code}"))
+        results.append(check("запрос без ключа отклоняется 401", empty.status_code == 401,
+                             f"HTTP {empty.status_code}"))
+        results.append(check("responses без ключа отклоняется 401",
+                             bad_responses.status_code == 401,
+                             f"HTTP {bad_responses.status_code}"))
 
     direct = json.loads(client.post("/v1/chat/completions", json=body).text)
     message = (direct.get("choices") or [{}])[0].get("message") or {}
