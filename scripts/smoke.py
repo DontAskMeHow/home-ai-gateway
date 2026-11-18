@@ -27,7 +27,7 @@ def main() -> int:
     parser.add_argument("--token", default=None)
     parser.add_argument("--model", default="next")
     parser.add_argument("--responses-model", default=None,
-                        help="алиас апстрима с /v1/responses (например, мост подписки)")
+                        help="алиас апстрима с /v1/responses (например, локальный мост)")
     args = parser.parse_args()
 
     headers = {}
