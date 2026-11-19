@@ -11,6 +11,11 @@ probe_interval_s: 30
 # Сколько держать сырых событий в SQLite.
 retention_days: 90
 
+# Недельная квота GPT: токены (in+out) с якоря сброса; окно до якоря —
+# предыдущая неделя. Убирает оба ключа из метрик, если не заданы.
+gpt_week_reset_at: "2026-01-05T00:00:00Z"
+gpt_week_limit_tokens: 100000000
+
 db: ./data/gateway.db
 log: ./data/usage.jsonl
 

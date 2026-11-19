@@ -20,6 +20,7 @@ import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import FastAPI, Request
@@ -248,6 +249,26 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 names.append(extra)
         return names
 
+    def _gpt_week() -> dict | None:
+        """Токены GPT с начала текущего недельного окна.
+
+        Якорь сброса — `gpt_week_reset_at` в конфиге (MSK или любой offset);
+        окно до якоря — предыдущая неделя, после — каждая следующая от якоря.
+        """
+        anchor = cfg.get("gpt_week_reset_at")
+        limit = cfg.get("gpt_week_limit_tokens")
+        if not anchor or not limit:
+            return None
+        start = datetime.fromisoformat(anchor).astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if now < start:
+            window_start = start - timedelta(weeks=1)
+        else:
+            weeks = int((now - start).total_seconds() // (7 * 86400))
+            window_start = start + timedelta(weeks=weeks)
+        since_z = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"tokens": store.tokens_since(conn, since_z), "limit": int(limit)}
+
     async def call_upstream(client: httpx.AsyncClient, name: str, payload: dict,
                             stream: bool, path: str = "/chat/completions"):
         up = cfg["upstreams"][name]
@@ -316,7 +337,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics():
-        text = metrics_mod.render(conn, health, list(samples))
+        text = metrics_mod.render(conn, health, list(samples), week=_gpt_week())
         return StreamingResponse(iter([text]),
                                  media_type="text/plain; version=0.0.4")
 

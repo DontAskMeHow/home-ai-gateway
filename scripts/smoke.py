@@ -149,6 +149,9 @@ def main() -> int:
     needed = ("gateway_requests_total", "gateway_tokens_total", "gateway_cost_usd",
               "gateway_model_tokens_total", "gateway_key_requests_total",
               "gateway_key_tokens_total", "gateway_key_cost_usd",
+              "gateway_key_model_tokens_total", "gateway_model_bucket_tokens_total",
+              "gateway_model_duration_seconds", "gateway_key_duration_seconds",
+              "gateway_gpt_week_tokens", "gateway_gpt_week_limit_tokens",
               "gateway_upstream_up", "gateway_request_duration_seconds_bucket")
     missing = [name for name in needed if name not in metrics]
     results.append(check("метрики содержат нужные серии", not missing,

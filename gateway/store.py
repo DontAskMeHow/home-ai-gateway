@@ -188,6 +188,57 @@ def by_key(conn: sqlite3.Connection) -> list[tuple]:
     ).fetchall()
 
 
+def tokens_since(conn: sqlite3.Connection, since_z: str,
+                 model_prefix: str = "gpt") -> int:
+    """Токены (prompt+completion, кэш и reasoning уже внутри) по моделям
+    с префиксом с момента `since_z` в формате now_iso — база недельной квоты."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(prompt + completion), 0) FROM events"
+        " WHERE ts >= ? AND model LIKE ?",
+        (since_z, model_prefix + "%"),
+    ).fetchone()
+    return int(row[0])
+
+
+def by_key_model(conn: sqlite3.Connection) -> list[tuple]:
+    """Токены по паре (ключ, модель) — кто какой моделью пользовался."""
+    return conn.execute(
+        "SELECT key, model, COALESCE(SUM(prompt + completion), 0) FROM events"
+        " GROUP BY key, model",
+    ).fetchall()
+
+
+def by_model_buckets(conn: sqlite3.Connection) -> list[tuple]:
+    """Букеты токенов по модели — состав потребления и кэш-доля."""
+    return conn.execute(
+        "SELECT model, COALESCE(SUM(prompt),0), COALESCE(SUM(cached),0),"
+        " COALESCE(SUM(completion),0), COALESCE(SUM(reasoning),0)"
+        " FROM events GROUP BY model",
+    ).fetchall()
+
+
+def duration_quantiles(conn: sqlite3.Connection, group: str = "model",
+                       window_hours: int = 24) -> list[tuple]:
+    """p50/p99 длительности запросов (сек) за окно, группировка model|key."""
+    cutoff = _ago(window_hours * 3600)
+    rows = conn.execute(
+        f"SELECT {group}, latency_ms FROM events"
+        f" WHERE ts >= ? AND latency_ms > 0",
+        (cutoff,),
+    ).fetchall()
+    groups: dict[str, list[float]] = {}
+    for name, ms in rows:
+        groups.setdefault(name, []).append(ms / 1000)
+    out = []
+    for name in sorted(groups):
+        values = sorted(groups[name])
+        n = len(values)
+        p50 = values[min(n - 1, max(0, round(0.5 * n) - 1))]
+        p99 = values[min(n - 1, max(0, round(0.99 * n) - 1))]
+        out.append((name, p50, p99))
+    return out
+
+
 def prune(conn: sqlite3.Connection, retention_days: int) -> int:
     cutoff = _ago(retention_days * 86400)
     cur = conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))

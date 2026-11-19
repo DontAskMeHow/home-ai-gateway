@@ -7,7 +7,8 @@ from . import store
 LATENCY_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300)
 
 
-def render(conn, health: dict, samples: list[float]) -> str:
+def render(conn, health: dict, samples: list[float],
+           week: dict | None = None) -> str:
     lines: list[str] = []
     totals = store.totals(conn)
     lines.append("# HELP gateway_requests_total Requests through the gateway")
@@ -50,6 +51,37 @@ def render(conn, health: dict, samples: list[float]) -> str:
             lines.append(f'gateway_key_tokens_total{{key="{key}",bucket="{bucket}"}} {value}')
         lines.append(f'gateway_key_cost_usd{{key="{key}",price="tco"}} {tco:.6f}')
         lines.append(f'gateway_key_cost_usd{{key="{key}",price="api"}} {api:.6f}')
+
+    lines.append("# HELP gateway_key_model_tokens_total Tokens by key and model (prompt+completion)")
+    lines.append("# TYPE gateway_key_model_tokens_total counter")
+    for key, model, tokens in store.by_key_model(conn):
+        lines.append(f'gateway_key_model_tokens_total{{key="{key}",model="{model}"}} {tokens}')
+
+    lines.append("# HELP gateway_model_bucket_tokens_total Token buckets by model")
+    lines.append("# TYPE gateway_model_bucket_tokens_total counter")
+    for model, prompt, cached, completion, reasoning in store.by_model_buckets(conn):
+        for bucket, value in (("prompt", prompt), ("cached", cached),
+                              ("completion", completion), ("reasoning", reasoning)):
+            lines.append(f'gateway_model_bucket_tokens_total{{model="{model}",bucket="{bucket}"}} {value}')
+
+    lines.append("# HELP gateway_model_duration_seconds Request duration quantiles by model, 24h fixed window")
+    lines.append("# TYPE gateway_model_duration_seconds gauge")
+    for model, p50, p99 in store.duration_quantiles(conn, "model"):
+        lines.append(f'gateway_model_duration_seconds{{model="{model}",quantile="0.5"}} {p50:.3f}')
+        lines.append(f'gateway_model_duration_seconds{{model="{model}",quantile="0.99"}} {p99:.3f}')
+
+    lines.append("# HELP gateway_key_duration_seconds Request duration p50 by key, 24h fixed window")
+    lines.append("# TYPE gateway_key_duration_seconds gauge")
+    for key, p50, _p99 in store.duration_quantiles(conn, "key"):
+        lines.append(f'gateway_key_duration_seconds{{key="{key}",quantile="0.5"}} {p50:.3f}')
+
+    if week:
+        lines.append("# HELP gateway_gpt_week_tokens GPT tokens (in+out) since current weekly window start")
+        lines.append("# TYPE gateway_gpt_week_tokens gauge")
+        lines.append(f"gateway_gpt_week_tokens {week['tokens']}")
+        lines.append("# HELP gateway_gpt_week_limit_tokens Configured weekly GPT token limit")
+        lines.append("# TYPE gateway_gpt_week_limit_tokens gauge")
+        lines.append(f"gateway_gpt_week_limit_tokens {week['limit']}")
 
     lines.append("# HELP gateway_upstream_up Upstream health from background probes")
     lines.append("# TYPE gateway_upstream_up gauge")
