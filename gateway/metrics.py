@@ -31,11 +31,12 @@ def render(conn, health: dict, samples: list[float],
         lines.append(f'gateway_model_requests_total{{model="{model}",status="{status}"}} {hits}')
     lines.append("# HELP gateway_model_tokens_total Tokens by model")
     lines.append("# TYPE gateway_model_tokens_total counter")
-    lines.append("# HELP gateway_model_cost_usd Cost in USD by model")
+    lines.append("# HELP gateway_model_cost_usd Cost in USD by model and price model")
     lines.append("# TYPE gateway_model_cost_usd counter")
-    for model, tokens, cost in store.by_model(conn):
+    for model, tokens, tco, api in store.by_model(conn):
         lines.append(f'gateway_model_tokens_total{{model="{model}"}} {tokens}')
-        lines.append(f'gateway_model_cost_usd{{model="{model}"}} {cost:.6f}')
+        lines.append(f'gateway_model_cost_usd{{model="{model}",price="tco"}} {tco:.6f}')
+        lines.append(f'gateway_model_cost_usd{{model="{model}",price="api"}} {api:.6f}')
 
     lines.append("# HELP gateway_key_requests_total Requests by key and status")
     lines.append("# TYPE gateway_key_requests_total counter")

@@ -165,10 +165,10 @@ def by_model_status(conn: sqlite3.Connection) -> list[tuple]:
 
 
 def by_model(conn: sqlite3.Connection) -> list[tuple]:
-    """Токены и стоимость по модели (без статуса — иначе дубли серий в /metrics)."""
+    """Токены и обе стоимости по модели (без статуса — иначе дубли серий в /metrics)."""
     return conn.execute(
-        "SELECT model, COALESCE(SUM(prompt + completion),0), COALESCE(SUM(cost_tco),0)"
-        " FROM events GROUP BY model",
+        "SELECT model, COALESCE(SUM(prompt + completion),0), COALESCE(SUM(cost_tco),0),"
+        " COALESCE(SUM(cost_api),0) FROM events GROUP BY model",
     ).fetchall()
 
 
