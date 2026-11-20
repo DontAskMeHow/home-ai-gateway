@@ -8,7 +8,8 @@ LATENCY_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300)
 
 
 def render(conn, health: dict, samples: list[float],
-           week: dict | None = None) -> str:
+           week: dict | None = None,
+           retries: dict[str, int] | None = None) -> str:
     lines: list[str] = []
     totals = store.totals(conn)
     lines.append("# HELP gateway_requests_total Requests through the gateway")
@@ -88,6 +89,12 @@ def render(conn, health: dict, samples: list[float],
     lines.append("# TYPE gateway_upstream_up gauge")
     for name, ok in sorted(health.items()):
         lines.append(f'gateway_upstream_up{{upstream="{name}"}} {1 if ok else 0}')
+
+    if retries:
+        lines.append("# HELP gateway_upstream_retries_total Upstream retries (transient 5xx, patient keys)")
+        lines.append("# TYPE gateway_upstream_retries_total counter")
+        for name, count in sorted(retries.items()):
+            lines.append(f'gateway_upstream_retries_total{{upstream="{name}"}} {count}')
 
     lines.append("# HELP gateway_request_duration_seconds Request latency")
     lines.append("# TYPE gateway_request_duration_seconds histogram")

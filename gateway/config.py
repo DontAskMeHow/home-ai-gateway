@@ -65,6 +65,9 @@ def load(path: str | os.PathLike[str] | None = None) -> dict:
         up.setdefault("model", name)
         up.setdefault("timeout_s", 60)
         up.setdefault("retries", 1)
+        up.setdefault("retry_backoff_s", [])
+        if isinstance(up["retry_backoff_s"], (int, float)):
+            up["retry_backoff_s"] = [up["retry_backoff_s"]]
         up.setdefault("fallback", [])
         if isinstance(up["fallback"], str):
             up["fallback"] = [up["fallback"]]
@@ -80,6 +83,7 @@ def load(path: str | os.PathLike[str] | None = None) -> dict:
         key.setdefault("rpm", 60)
         key.setdefault("tpm", 200_000)
         key.setdefault("daily_budget_usd", 10.0)
+        key.setdefault("patient", False)
 
     cfg["_path"] = str(cfg_path)
 

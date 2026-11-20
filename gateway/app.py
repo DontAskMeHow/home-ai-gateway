@@ -6,7 +6,9 @@
   - авторизацию по виртуальным ключам: неизвестный или пустой — 401;
   - учёт токенов по четырём букетам и стоимости по двум таблицам цен;
   - лимиты на ключ (rpm / tpm / дневной бюджет) с настоящим отклонением запроса;
-  - честную деградацию: не стало апстрима — 503, без тихих повторов длинных запросов.
+  - честную деградацию: не стало апстрима — 503; транзиентные 5xx для
+    терпеливых ключей (`patient`) — ретраи той же модели с бэк-оффом, пока
+    апстрим жив по пробам; сеть и read-таймауты не ретраятся.
 
 Адреса и токены живут в конфиге (`config.local.yaml`), здесь их нет.
 """
@@ -210,7 +212,7 @@ def _responses_stream_done(text: str, usage: dict) -> bool:
 
 
 async def _probe_loop(client: httpx.AsyncClient, cfg: dict, health: dict,
-                      errors: dict) -> None:
+                      errors: dict, probe_fails: dict) -> None:
     interval = float(cfg.get("probe_interval_s", 30))
     while True:
         for name, up in cfg["upstreams"].items():
@@ -225,6 +227,7 @@ async def _probe_loop(client: httpx.AsyncClient, cfg: dict, health: dict,
             except Exception as exc:
                 health[name] = False
                 errors[name] = f"{type(exc).__name__}: {exc}"[:160]
+            probe_fails[name] = 0 if health[name] else probe_fails.get(name, 0) + 1
         await asyncio.sleep(interval)
 
 
@@ -234,6 +237,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
     jsonl_path = cfg.get("log", "./data/usage.jsonl")
     health: dict[str, bool] = {name: False for name in cfg["upstreams"]}
     errors: dict[str, str] = {name: "не опрослен" for name in cfg["upstreams"]}
+    # последовательные неудачи проб (30 с): 4+ подряд = апстрим мёртв ~2 мин,
+    # ретраи терпеливого режима отключаются — модель реально недоступна
+    probe_fails: dict[str, int] = {name: 0 for name in cfg["upstreams"]}
+    retry_counts: dict[str, int] = {name: 0 for name in cfg["upstreams"]}
     samples: deque[float] = deque(maxlen=2000)
 
     @asynccontextmanager
@@ -241,7 +248,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         # До апстримов по умолчанию идём напрямую: системный прокси рабочих машин
         # часто не пропускает внутренние адреса. Включается ключом `trust_env: true`.
         app.state.client = httpx.AsyncClient(trust_env=bool(cfg.get("trust_env", False)))
-        task = asyncio.create_task(_probe_loop(app.state.client, cfg, health, errors))
+        task = asyncio.create_task(_probe_loop(app.state.client, cfg, health, errors,
+                                                probe_fails))
         store.prune(conn, int(cfg.get("retention_days", 90)))
         try:
             yield
@@ -280,7 +288,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return {"tokens": store.tokens_since(conn, since_z), "limit": int(limit)}
 
     async def call_upstream(client: httpx.AsyncClient, name: str, payload: dict,
-                            stream: bool, path: str = "/chat/completions"):
+                            stream: bool, path: str = "/chat/completions",
+                            patient: bool = False):
         up = cfg["upstreams"][name]
         url = up["base_url"].rstrip("/") + path
         headers = {"Content-Type": "application/json"}
@@ -290,8 +299,19 @@ def create_app(config_path: str | None = None) -> FastAPI:
         body["model"] = up["model"]
         timeout = httpx.Timeout(float(up["timeout_s"]), connect=10.0)
 
+        # Паузы между попытками: мгновенные `retries` + терпеливый бэк-офф.
+        # Терпеливый режим (ключ `patient`) ретраит транзиентные 5xx только
+        # пока апстрим жив по пробам (4+ подряд неудач — ретраи отключены).
+        pauses = [0.0] * int(up.get("retries", 0))
+        if patient and probe_fails.get(name, 0) < 4:
+            pauses += [float(p) for p in up.get("retry_backoff_s") or []]
+
         last_error = "апстрим не настроен"
-        for _ in range(int(up["retries"]) + 1):
+        for attempt, pause in enumerate((0.0, *pauses)):
+            if attempt:
+                retry_counts[name] = retry_counts.get(name, 0) + 1
+                if pause:
+                    await asyncio.sleep(pause)
             try:
                 if stream:
                     request = client.build_request("POST", url, json=body,
@@ -306,8 +326,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
                         await resp.aclose()
                     continue
                 return resp
-            except (httpx.TimeoutException, httpx.ConnectError) as exc:
-                last_error = f"{name}: {type(exc).__name__}"
+            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                # сеть до апстрима отвалилась — ретраи бессмысленны
+                raise RuntimeError(f"{name}: {type(exc).__name__}") from exc
+            except httpx.TimeoutException as exc:
+                # read-таймаут: генерация уже шла дольше timeout_s, не дублируем
+                raise RuntimeError(f"{name}: {type(exc).__name__}") from exc
+            except Exception as exc:
+                # прочие обрывы транспорта (ReadError, RemoteProtocolError…) —
+                # отказ без ретрая, с честной записью в журнал
+                raise RuntimeError(f"{name}: {type(exc).__name__}") from exc
         raise RuntimeError(last_error)
 
     def finish(key_name: str, upstream: str, prompt: int, cached: int, completion: int,
@@ -347,7 +375,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics():
-        text = metrics_mod.render(conn, health, list(samples), week=_gpt_week())
+        text = metrics_mod.render(conn, health, list(samples), week=_gpt_week(),
+                                  retries=retry_counts)
         return StreamingResponse(iter([text]),
                                  media_type="text/plain; version=0.0.4")
 
@@ -384,12 +413,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
         chain = chain_of(alias)
         stream = bool(payload.get("stream"))
         prompt_text = _prompt_text(payload)
+        patient = bool(key_conf.get("patient"))
         client: httpx.AsyncClient = request.app.state.client
         started = time.perf_counter()
 
         for name in chain:
             try:
-                resp = await call_upstream(client, name, payload, stream)
+                resp = await call_upstream(client, name, payload, stream,
+                                           patient=patient)
             except RuntimeError as exc:
                 finish(key_name, name, 0, 0, 0, 0, started, f"error:{exc}"[:80],
                        prompt_text)
@@ -485,13 +516,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
         chain = chain_of(alias)
         stream = bool(payload.get("stream"))
         prompt_text = _responses_prompt_text(payload)
+        patient = bool(key_conf.get("patient"))
         client: httpx.AsyncClient = request.app.state.client
         started = time.perf_counter()
 
         for name in chain:
             try:
                 resp = await call_upstream(client, name, payload, stream,
-                                           path="/responses")
+                                           path="/responses", patient=patient)
             except RuntimeError as exc:
                 finish(key_name, name, 0, 0, 0, 0, started, f"error:{exc}"[:80],
                        prompt_text)
