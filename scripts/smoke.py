@@ -3,7 +3,8 @@
     python scripts/smoke.py --base http://localhost:8090 --token sk-gateway-scripts
 
 Проверяет: здоровье, список моделей, чат без стрима и со стримом, объём токенов,
-отклонение по rpm, наличие букетов в /metrics, отклонение неизвестного ключа.
+учёт обрыва стрима клиентом, отклонение по rpm, наличие букетов в /metrics,
+отклонение неизвестного ключа.
 """
 
 from __future__ import annotations
@@ -110,6 +111,31 @@ def main() -> int:
                          repr("".join(pieces))[:60]))
     results.append(check("usage пришёл в финальном чанке", bool(final_usage),
                          json.dumps(final_usage)[:120]))
+
+    # Обрыв стрима клиентом на середине: учёт обязан писать error:client_aborted
+    # (v1.4 — раньше обрыв не записывался вовсе, слепая зона метрик).
+    def status_counter(metric_text: str) -> float:
+        prefix = (f'gateway_model_requests_total{{model="{args.model}",'
+                  f'status="error:client_aborted"}}')
+        for line in metric_text.splitlines():
+            if line.startswith(prefix):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    aborted_before = status_counter(client.get("/metrics").text)
+    with client.stream("POST", "/v1/chat/completions", json=stream_body) as resp:
+        seen = 0
+        for line in resp.iter_lines():
+            if line.startswith("data:"):
+                seen += 1
+                if seen >= 2:
+                    break
+    time.sleep(3)
+    aborted_after = status_counter(client.get("/metrics").text)
+    results.append(check("обрыв стрима клиентом пишется в учёт",
+                         aborted_after > aborted_before,
+                         f"error:client_aborted {aborted_before:.0f} → "
+                         f"{aborted_after:.0f} (чанков прочитано {seen})"))
 
     if args.responses_model:
         responses_body = {"model": args.responses_model, "max_output_tokens": 160,

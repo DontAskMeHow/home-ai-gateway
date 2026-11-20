@@ -199,6 +199,16 @@ def _usage_from_sse_responses(text: str) -> tuple[dict, str]:
     return usage, "".join(pieces)
 
 
+def _chat_stream_done(text: str, usage: dict) -> bool:
+    """Штатное завершение chat-SSE: маркер [DONE] или usage в финальном чанке."""
+    return "data: [DONE]" in text or bool(usage)
+
+
+def _responses_stream_done(text: str, usage: dict) -> bool:
+    """Штатное завершение responses-SSE: [DONE], response.completed или usage."""
+    return "data: [DONE]" in text or "response.completed" in text or bool(usage)
+
+
 async def _probe_loop(client: httpx.AsyncClient, cfg: dict, health: dict,
                       errors: dict) -> None:
     interval = float(cfg.get("probe_interval_s", 30))
@@ -394,17 +404,35 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
                 async def relay(response=resp, upstream=name):
                     collected: list[str] = []
+                    status: str | None = None
                     try:
-                        async for chunk in response.aiter_text():
-                            collected.append(chunk)
-                            yield chunk
-                    finally:
+                        try:
+                            async for chunk in response.aiter_text():
+                                collected.append(chunk)
+                                yield chunk
+                        except Exception as exc:
+                            status = f"error:stream:{type(exc).__name__}"[:80]
+                        finally:
+                            await response.aclose()
+                        text = "".join(collected)
+                        usage_obj, answer = _usage_from_sse(text)
+                        if status is None:
+                            status = ("ok" if _chat_stream_done(text, usage_obj)
+                                      else "error:stream_aborted")
+                        prompt, cached, completion, reasoning = _buckets(
+                            usage_obj, answer, prompt_text)
+                        finish(key_name, upstream, prompt, cached, completion,
+                               reasoning, started, status, prompt_text)
+                    except (GeneratorExit, asyncio.CancelledError):
+                        # клиент ушёл до конца стрима: апстрим закрыть, учёт честный
                         await response.aclose()
-                    usage_obj, answer = _usage_from_sse("".join(collected))
-                    prompt, cached, completion, reasoning = _buckets(
-                        usage_obj, answer, prompt_text)
-                    finish(key_name, upstream, prompt, cached, completion, reasoning,
-                           started, "ok", prompt_text)
+                        usage_obj, answer = _usage_from_sse("".join(collected))
+                        prompt, cached, completion, reasoning = _buckets(
+                            usage_obj, answer, prompt_text)
+                        finish(key_name, upstream, prompt, cached, completion,
+                               reasoning, started, "error:client_aborted",
+                               prompt_text)
+                        raise
 
                 return StreamingResponse(relay(), media_type="text/event-stream",
                                          headers=headers)
@@ -478,17 +506,36 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
                 async def relay(response=resp, upstream=name):
                     collected: list[str] = []
+                    status: str | None = None
                     try:
-                        async for chunk in response.aiter_text():
-                            collected.append(chunk)
-                            yield chunk
-                    finally:
+                        try:
+                            async for chunk in response.aiter_text():
+                                collected.append(chunk)
+                                yield chunk
+                        except Exception as exc:
+                            status = f"error:stream:{type(exc).__name__}"[:80]
+                        finally:
+                            await response.aclose()
+                        text = "".join(collected)
+                        usage_obj, answer = _usage_from_sse_responses(text)
+                        if status is None:
+                            status = ("ok" if _responses_stream_done(text, usage_obj)
+                                      else "error:stream_aborted")
+                        prompt, cached, completion, reasoning = _buckets_responses(
+                            usage_obj, answer, prompt_text)
+                        finish(key_name, upstream, prompt, cached, completion,
+                               reasoning, started, status, prompt_text)
+                    except (GeneratorExit, asyncio.CancelledError):
+                        # клиент ушёл до конца стрима: апстрим закрыть, учёт честный
                         await response.aclose()
-                    usage_obj, answer = _usage_from_sse_responses("".join(collected))
-                    prompt, cached, completion, reasoning = _buckets_responses(
-                        usage_obj, answer, prompt_text)
-                    finish(key_name, upstream, prompt, cached, completion, reasoning,
-                           started, "ok", prompt_text)
+                        usage_obj, answer = _usage_from_sse_responses(
+                            "".join(collected))
+                        prompt, cached, completion, reasoning = _buckets_responses(
+                            usage_obj, answer, prompt_text)
+                        finish(key_name, upstream, prompt, cached, completion,
+                               reasoning, started, "error:client_aborted",
+                               prompt_text)
+                        raise
 
                 return StreamingResponse(relay(), media_type="text/event-stream",
                                          headers=headers)
